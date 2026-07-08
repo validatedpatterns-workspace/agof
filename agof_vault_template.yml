@@ -1,32 +1,65 @@
 ---
-aws_account_nbr_vault: 'Your AWS account number - needed to share composer images with'
+aws_account_nbr_vault: 'Your AWS account number'
 aws_access_key_vault: 'Your AWS access key'
 aws_secret_key_vault: 'Your AWS secret key'
 
-pattern_prefix: 'A name to distinguish this pattern from other patterns installed on the same infrastructure'
 pattern_dns_zone: 'A public DNS zone managed by AWS Route53'
 
 ec2_name_prefix: 'A unique prefix to distinguish instances in AWS. Used as the pattern name and in public DNS entries'
 ec2_region: 'An AWS region that your account has access to'
 
 # Generate it from https://access.redhat.com/management/api
-offline_token: 'A Red Hat offline token used to build the RHEL image on console.redhat.com'
+offline_token: 'A Red Hat offline token used to download the AAP containerized installer'
 
 redhat_username: 'Red Hat Subscription username, used to login to registry.redhat.io'
 redhat_password: 'Red Hat Subscription password, used to login to registry.redhat.io'
 
 admin_password: 'An admin password for AAP Controller and Automation Hub'
 
-# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.6/html/installing_on_openshift_container_platform/assembly-gateway-licensing-operator-copy
+# Platform gateway OAuth token for config-as-code (optional on 2.5; preferred on 2.6 and 2.7).
+#aap_token_vault: 'Gateway OAuth token from Access > Tokens or POST /api/gateway/v1/tokens/'
+#hub_token_vault: 'Automation Hub API token when config repo defines hub resources'
+
+# AAP minor version to install and configure (2.5, 2.6, or 2.7). Drives containerized installer download and collection pins.
+#containerized_installer_version: '2.5'
+#aap_version: '2.5'
+
+# https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/installing_on_openshift_container_platform/assembly-gateway-licensing-operator-copy
 manifest_content: "Content for a manifest file to entitle AAP Controller. See below for an example of how to point to a local file"
 #manifest_content: "{{ lookup('file', '~/Downloads/manifest_AVP_20230510T202608Z.zip') | b64encode }}"
 
 org_number_vault: "The Organization Number attached to your Red Hat Subscription for RHEL and AAP"
-activation_key_vault: "The name of an Activation Key to embed in the imagebuilder image"
+activation_key_vault: "The name of an Activation Key used to register RHEL instances at bootstrap time"
 
-# Set these variables to provide your own AMI, or to re-use an AMI previously generated with this process
-#skip_imagebuilder_build: 'boolean: skips imagebuilder build process'
-#imagebuilder_ami: 'The ID of an AWS AMI image, preferably one that was built with this toolkit'
+# Optional: pin a specific RHEL AMI instead of looking up the latest by rhel_version
+#rhel_ami_id_vault: 'ami-0123456789abcdef0'
+
+# Do not set ansible_remote_tmp here; the framework sets per-user paths on each host.
+
+# Config-as-code repo checked out into agof_controller_config_dir (agof_cac_repo* preferred)
+#agof_cac_repo: 'https://github.com/your-org/your-pattern-config.git'
+#agof_cac_repo_version: 'main'
+
+# Private repo over HTTPS (see README §4.1.1 for GitHub, GitLab, and Forgejo/Gitea examples)
+#agof_config_repo_https_token_vault: 'your-personal-access-token'
+#agof_config_repo_https_username: oauth2
+#agof_config_repo_https_ssl_verify: false
+
+# Private repo over SSH (key content or path to existing key file)
+#agof_config_repo_ssh_private_key_vault: |
+#  -----BEGIN OPENSSH PRIVATE KEY-----
+#  ...
+#  -----END OPENSSH PRIVATE KEY-----
+#agof_config_repo_ssh_private_key_file: '~/.ssh/id_ed25519'
+#agof_config_repo_ssh_accept_hostkey: false
+#agof_config_repo_ssh_known_host:
+#  name: github.com
+#  key: "github.com ssh-ed25519 AAAA..."
+
+# Optional HTTP(S) proxy for config repo git checkout
+#agof_config_repo_http_proxy: 'http://proxy.example.com:8080'
+#agof_config_repo_https_proxy: 'http://proxy.example.com:8080'
+#agof_config_repo_no_proxy: 'localhost,127.0.0.1,.example.com'
 
 automation_hub_token_vault: 'A token associated with your AAP subscription used to retrieve Automation Hub content'
 

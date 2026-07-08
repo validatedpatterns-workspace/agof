@@ -1,0 +1,324 @@
+---
+- name: Look for existing SSH private keys (e.g. OpenShift VP init container)
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ agof_config_repo_ssh_identity_candidates }}"
+  register: agof_config_repo_ssh_identity_stat
+  when: agof_config_repo is match('^(git@|ssh://)')
+
+- name: Select existing SSH private key for config repo checkout
+  ansible.builtin.set_fact:
+    agof_config_repo_ssh_key_file_from_home: "{{ item.item }}"
+  loop: "{{ agof_config_repo_ssh_identity_stat.results | default([]) }}"
+  when:
+    - item.stat is defined
+    - item.stat.exists
+    - item.stat.isreg
+    - agof_config_repo_ssh_key_file_from_home is not defined
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Look for SSH known_hosts prepared by OpenShift VP init
+  ansible.builtin.stat:
+    path: "{{ agof_config_repo_home_known_hosts_path }}"
+  register: agof_config_repo_home_known_hosts
+  when:
+    - agof_config_repo is match('^(git@|ssh://)')
+    - agof_config_repo_ssh_known_host is not defined
+
+- name: Assert SSH credentials are configured for SSH config repo URLs
+  ansible.builtin.assert:
+    that:
+      - agof_config_repo is defined
+      - agof_config_repo | length > 0
+      - >-
+        not (agof_config_repo is match('^(git@|ssh://)'))
+        or (agof_config_repo_ssh_private_key_vault is defined and agof_config_repo_ssh_private_key_vault | length > 0)
+        or (agof_config_repo_ssh_private_key_file | default('') | length > 0)
+        or (agof_config_repo_ssh_key_file_from_home | default('') | length > 0)
+    fail_msg: >-
+      agof_config_repo uses SSH ({{ agof_config_repo | default('undefined') }}) but no SSH private key was supplied.
+      Set agof_config_repo_ssh_private_key_vault or agof_config_repo_ssh_private_key_file in ~/agof_vault.yml,
+      configure agof.gitAuthSecret in the aap-config chart, or place a key at ~/.ssh/id_ed25519 or ~/.ssh/id_rsa.
+      See README section 4.1.1 (Config-as-code repository authentication).
+
+- name: Determine whether explicit HTTPS credentials were provided
+  ansible.builtin.set_fact:
+    agof_config_repo_https_auth_explicit: >-
+      {{
+        (agof_config_repo_https_token_vault | default('') | length > 0)
+        or (agof_config_repo_https_token | default('') | length > 0)
+        or (agof_config_repo_https_password_vault | default('') | length > 0)
+        or (agof_config_repo_https_password | default('') | length > 0)
+      }}
+  when: agof_config_repo is match('^https?://')
+
+- name: Remove git credential artifacts for anonymous HTTPS checkout
+  when:
+    - agof_config_repo is match('^https?://')
+    - not (agof_config_repo_https_auth_explicit | default(false) | bool)
+  block:
+    - name: Remove git credential store file
+      ansible.builtin.file:
+        path: "{{ agof_config_repo_git_credentials_store_path }}"
+        state: absent
+
+    - name: Clear global git credential helper configuration
+      ansible.builtin.command:
+        cmd: git config --global --unset-all credential.helper
+      changed_when: git_global_credential_helper.rc == 0
+      failed_when: false
+      register: git_global_credential_helper
+
+- name: Resolve explicit HTTPS credentials from vault for config repo checkout
+  when:
+    - agof_config_repo is match('^https?://')
+    - agof_config_repo_https_auth_explicit | default(false) | bool
+    - agof_config_repo_https_secret is not defined
+  block:
+    - name: Resolve config repo HTTPS credential values
+      ansible.builtin.set_fact:
+        agof_config_repo_https_secret: >-
+          {{
+            agof_config_repo_https_token_vault
+            | default(agof_config_repo_https_token)
+            | default(agof_config_repo_https_password_vault)
+            | default(agof_config_repo_https_password)
+          }}
+        agof_config_repo_https_username_effective: >-
+          {%- if agof_config_repo_https_username | default('') | length > 0 -%}
+          {{ agof_config_repo_https_username }}
+          {%- elif 'github.com' in agof_config_repo -%}
+          git
+          {%- elif 'gitlab' in agof_config_repo -%}
+          oauth2
+          {%- else -%}
+          git
+          {%- endif -%}
+      no_log: true
+
+- name: Build authenticated HTTPS config repo URL
+  ansible.builtin.set_fact:
+    agof_config_repo_checkout_url: >-
+      https://{{ agof_config_repo_https_username_effective | urlencode }}:{{
+        agof_config_repo_https_secret | urlencode
+      }}@{{ agof_config_repo | regex_replace('^https?://', '') }}
+  when:
+    - agof_config_repo is match('^https?://')
+    - agof_config_repo_https_auth_explicit | default(false) | bool
+    - agof_config_repo_https_secret is defined
+    - agof_config_repo_https_secret | length > 0
+    - agof_config_repo_checkout_url is not defined
+  no_log: true
+
+- name: Use plain config repo URL for anonymous HTTPS checkout
+  ansible.builtin.set_fact:
+    agof_config_repo_checkout_url: "{{ agof_config_repo }}"
+  when: agof_config_repo_checkout_url is not defined
+
+- name: Ensure config repo credentials directory exists
+  ansible.builtin.file:
+    path: "{{ agof_config_repo_credentials_dir }}"
+    state: directory
+    mode: "0700"
+  when:
+    - agof_config_repo_ssh_private_key_vault is defined
+    - agof_config_repo_ssh_private_key_vault | length > 0
+
+- name: Install SSH private key for config repo checkout
+  ansible.builtin.copy:
+    content: "{{ agof_config_repo_ssh_private_key_vault }}"
+    dest: "{{ agof_config_repo_credentials_dir }}/id_ed25519"
+    mode: "0600"
+  when:
+    - agof_config_repo_ssh_private_key_vault is defined
+    - agof_config_repo_ssh_private_key_vault | length > 0
+  no_log: true
+
+- name: Stat explicit SSH private key file for config repo checkout
+  ansible.builtin.stat:
+    path: "{{ agof_config_repo_ssh_private_key_file | expanduser }}"
+  register: agof_config_repo_ssh_key_file_explicit
+  when:
+    - agof_config_repo is match('^(git@|ssh://)')
+    - agof_config_repo_ssh_private_key_file | default('') | length > 0
+
+- name: Assert explicit SSH private key file exists
+  ansible.builtin.assert:
+    that:
+      - agof_config_repo_ssh_key_file_explicit.stat is defined
+      - agof_config_repo_ssh_key_file_explicit.stat.exists
+      - agof_config_repo_ssh_key_file_explicit.stat.isreg
+    fail_msg: >-
+      agof_config_repo_ssh_private_key_file is set to {{ agof_config_repo_ssh_private_key_file | quote }}
+      but no regular file exists at {{ agof_config_repo_ssh_private_key_file | expanduser }}.
+      Use an absolute path or quote the vault value (for example "~/.ssh/id_ed25519").
+      On OpenShift Validated Patterns with agof.gitAuthSecret, omit this variable so AGOF
+      auto-detects the key installed by the init container (usually ~/.ssh/id_rsa).
+  when:
+    - agof_config_repo is match('^(git@|ssh://)')
+    - agof_config_repo_ssh_private_key_file | default('') | length > 0
+
+- name: Resolve SSH private key path for config repo checkout
+  ansible.builtin.set_fact:
+    agof_config_repo_ssh_key_file_effective: >-
+      {{
+        agof_config_repo_ssh_private_key_file | expanduser
+        if (agof_config_repo_ssh_private_key_file | default('') | length > 0)
+        else (
+          agof_config_repo_credentials_dir ~ '/id_ed25519'
+          if (agof_config_repo_ssh_private_key_vault is defined and agof_config_repo_ssh_private_key_vault | length > 0)
+          else agof_config_repo_ssh_key_file_from_home | default('')
+        )
+      }}
+  when:
+    - agof_config_repo is match('^(git@|ssh://)')
+      or (agof_config_repo_ssh_private_key_vault is defined and agof_config_repo_ssh_private_key_vault | length > 0)
+      or (agof_config_repo_ssh_private_key_file | default('') | length > 0)
+      or (agof_config_repo_ssh_key_file_from_home | default('') | length > 0)
+
+- name: Install SSH known_hosts entry for config repo host
+  ansible.builtin.known_hosts:
+    path: "{{ agof_config_repo_credentials_dir }}/known_hosts"
+    name: "{{ agof_config_repo_ssh_known_host.name }}"
+    key: "{{ agof_config_repo_ssh_known_host.key }}"
+  when: agof_config_repo_ssh_known_host is defined
+
+- name: Build SSH options for config repo checkout
+  ansible.builtin.set_fact:
+    agof_config_repo_ssh_opts_effective: >-
+      {{
+        (
+          (
+            ['-o UserKnownHostsFile=' ~ agof_config_repo_credentials_dir ~ '/known_hosts']
+            if agof_config_repo_ssh_known_host is defined
+            else (
+              ['-o UserKnownHostsFile=' ~ agof_config_repo_home_known_hosts_path, '-o StrictHostKeyChecking=yes']
+              if (agof_config_repo_home_known_hosts.stat is defined and agof_config_repo_home_known_hosts.stat.exists)
+              else ['-o StrictHostKeyChecking=no', '-o UserKnownHostsFile=/dev/null']
+            )
+          )
+          + (
+            [agof_config_repo_ssh_extra_opts]
+            if (agof_config_repo_ssh_extra_opts | default('') | length > 0)
+            else []
+          )
+        ) | join(' ')
+      }}
+  when: agof_config_repo is match('^(git@|ssh://)')
+
+- name: Build git config overrides for HTTPS checkout
+  ansible.builtin.set_fact:
+    agof_config_repo_git_config_environment: >-
+      {%- set entries = (
+          (
+            [['credential.helper', ''], ['core.askPass', '']]
+            if not (agof_config_repo_https_auth_explicit | default(false) | bool)
+            else []
+          )
+          + (
+            [['http.sslVerify', 'false']]
+            if not (agof_config_repo_https_ssl_verify | default(true) | bool)
+            else []
+          )
+        ) -%}
+      {%- set env = {'GIT_CONFIG_COUNT': entries | length | string} -%}
+      {%- for item in entries -%}
+      {%- set _ = env.update({'GIT_CONFIG_KEY_' ~ loop.index0: item[0], 'GIT_CONFIG_VALUE_' ~ loop.index0: item[1]}) -%}
+      {%- endfor -%}
+      {{ env if entries | length > 0 else {} }}
+  when: agof_config_repo is match('^https?://')
+
+- name: Compose git checkout environment
+  ansible.builtin.set_fact:
+    agof_config_repo_git_checkout_environment: >-
+      {{
+        agof_config_repo_git_environment | default({})
+        | combine({
+            'GIT_TERMINAL_PROMPT': '0',
+            'GIT_ASKPASS': '',
+            'HOME': lookup('env', 'HOME')
+          })
+        | combine(agof_config_repo_git_config_environment | default({}))
+      }}
+
+- name: Check whether config repo destination is already a git checkout
+  ansible.builtin.stat:
+    path: "{{ agof_controller_config_dir }}/.git"
+  register: agof_config_repo_dest_git
+
+- name: Remove stale non-git config repo destination
+  ansible.builtin.file:
+    path: "{{ agof_controller_config_dir }}"
+    state: absent
+  when: not agof_config_repo_dest_git.stat.exists
+
+- name: Checkout infrastructure-as-code directory
+  block:
+    - name: Clone or update config-as-code repository
+      ansible.builtin.git:
+        repo: "{{ agof_config_repo_checkout_url }}"
+        version: "{{ agof_config_repo_version }}"
+        dest: "{{ agof_controller_config_dir }}"
+        force: true
+        clone: true
+        update: true
+        recursive: true
+        key_file: "{{ agof_config_repo_ssh_key_file_effective | default(omit) }}"
+        accept_hostkey: >-
+          {{
+            (agof_config_repo_ssh_accept_hostkey | default(false) | bool)
+            or (
+              agof_config_repo_ssh_known_host is not defined
+              and not (
+                agof_config_repo_home_known_hosts.stat is defined
+                and agof_config_repo_home_known_hosts.stat.exists
+              )
+            )
+          }}
+        ssh_opts: "{{ agof_config_repo_ssh_opts_effective | default(omit) }}"
+      environment: "{{ agof_config_repo_git_checkout_environment | default({}) }}"
+      register: git_checkout
+      no_log: "{{ agof_config_repo_https_auth_explicit | default(false) | bool }}"
+
+    - name: Verify config repo checkout created destination directory
+      ansible.builtin.stat:
+        path: "{{ agof_controller_config_dir }}/.git"
+      register: agof_config_repo_checkout_git
+      failed_when: not agof_config_repo_checkout_git.stat.exists
+
+  rescue:
+    - name: Report config repo checkout failure
+      ansible.builtin.fail:
+        msg: >-
+          Failed to check out {{ agof_config_repo_checkout_url | regex_replace('://[^@/]+@', '://') }}.
+          {% set git_err = (
+              ansible_failed_result.msg | default('')
+            ) ~ (
+              git_checkout.msg | default('')
+            ) ~ (
+              git_checkout.stderr | default('')
+            ) %}
+          {% if git_err is search('(?i)repository not found|not found') %}
+          The remote repository was not found. Verify agof_cac_repo / agof_iac_repo is correct
+          (for the minimal example use https://github.com/validatedpatterns-demos/agof_minimal_config.git).
+          {% elif git_err is search('(?i)permission denied|publickey|could not read from remote') %}
+          SSH authentication failed for {{ agof_config_repo | default('config repo') }}.
+          Ensure the private key is authorized for this repository (deploy key or account key),
+          and that agof_config_repo_ssh_private_key_file points at an existing key
+          ({{ agof_config_repo_ssh_key_file_effective | default('not resolved') }}).
+          {% elif git_err is search('(?i)host key verification failed|known_hosts') %}
+          SSH host key verification failed. Set agof_config_repo_ssh_known_host, ensure
+          {{ agof_config_repo_home_known_hosts_path }} contains the Git host, or allow
+          agof_config_repo_ssh_accept_hostkey for lab use.
+          {% elif git_err is search('(?i)username|authentication|403|401') and not git_err is search('(?i)not found') %}
+          HTTPS authentication failed. Set agof_config_repo_https_token_vault in ~/agof_vault.yml
+          or configure agof.gitAuthSecret in the aap-config chart for private repositories.
+          For GitHub fine-grained PATs (github_pat_...), ensure the token has repository contents read access
+          and use username git (the default for github.com).
+          {% elif git_err is search('(?i)ssl certificate|certificate problem|unable to get local issuer|self signed certificate') %}
+          HTTPS TLS verification failed. Install the Git server's CA on the provisioner, or set
+          agof_config_repo_https_ssl_verify: false in ~/agof_vault.yml for lab use only.
+          {% else %}
+          {{ git_err if git_err | length > 0 else ansible_failed_result.msg | default('unknown git error') }}
+          {% endif %}

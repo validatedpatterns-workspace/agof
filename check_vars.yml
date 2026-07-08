@@ -34,10 +34,6 @@
         description: "AWS region (e.g. us-east-1)"
         hint: "Set in ~/agof_vault.yml. Pick a region your account has access to. See agof_vault_template.yml for reference"
 
-      - name: pattern_prefix
-        description: "A name to distinguish this pattern from others on the same infrastructure"
-        hint: "Set in ~/agof_vault.yml. See agof_vault_template.yml for reference"
-
       - name: pattern_dns_zone
         description: "A public DNS zone managed by AWS Route53"
         hint: "Set in ~/agof_vault.yml. Must be a Route53 hosted zone in your AWS account"
@@ -45,7 +41,7 @@
     # ---- Required variables (~/agof_vault.yml) ----
     _vault_vars:
       - name: offline_token
-        description: "Red Hat offline token (used for RHEL image builds on console.redhat.com)"
+        description: "Red Hat offline token (used to download the AAP containerized installer)"
         hint: "Set in ~/agof_vault.yml. Generate at https://access.redhat.com/management/api"
 
       - name: redhat_username
@@ -64,7 +60,7 @@
         description: "Base64-encoded manifest file to entitle AAP Controller"
         hint: !unsafe >-
           Set in ~/agof_vault.yml. Download a manifest from
-          https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.6/html/installing_on_openshift_container_platform/assembly-gateway-licensing-operator-copy#assembly-aap-obtain-manifest-files
+          https://docs.redhat.com/en/documentation/red_hat_ansible_automation_platform/2.7/html/installing_on_openshift_container_platform/assembly-gateway-licensing-operator-copy#assembly-aap-obtain-manifest-files
           Then set: manifest_content: "{{ lookup('file', '~/path/to/manifest.zip') | b64encode }}"
 
       - name: org_number_vault
@@ -72,7 +68,7 @@
         hint: "Set in ~/agof_vault.yml. Find it at https://access.redhat.com/management -> Overview (top-left)"
 
       - name: activation_key_vault
-        description: "Activation Key name for the imagebuilder RHEL image"
+        description: "Activation Key name for RHEL registration at bootstrap time"
         hint: "Set in ~/agof_vault.yml. Create one at https://access.redhat.com/management/activation_keys"
 
       - name: automation_hub_token_vault
@@ -80,6 +76,10 @@
         hint: "Set in ~/agof_vault.yml. Get it from https://console.redhat.com/ansible/automation-hub/token"
 
   tasks:
+    - name: Resolve target AAP version from vault overrides
+      ansible.builtin.set_fact:
+        aap_version: "{{ (aap_version | default(containerized_installer_version | default('2.7'))) | string }}"
+
     - name: "Check that vault file exists"
       ansible.builtin.stat:
         path: "~/agof_vault.yml"
@@ -186,6 +186,20 @@
       when:
         - admin_password is defined
         - admin_password == "ansible"
+
+    - name: "Check aap_version is supported"
+      ansible.builtin.set_fact:
+        _validation_errors: >-
+          {{ _validation_errors + [
+            {
+              'variable': 'aap_version',
+              'description': "aap_version must be one of {{ agof_supported_aap_versions | join(', ') }} (got '{{ aap_version }}')",
+              'hint': 'Set containerized_installer_version or aap_version in ~/agof_vault.yml, then re-run make preinit'
+            }
+          ] }}
+      when:
+        - aap_version is defined
+        - aap_version not in agof_supported_aap_versions
 
     # ---- Report results ----
     - name: "All variables validated successfully"

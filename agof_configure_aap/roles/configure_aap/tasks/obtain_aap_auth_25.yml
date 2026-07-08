@@ -1,0 +1,163 @@
+---
+- name: Evaluate whether current aap_token can be used for API authentication
+  ansible.builtin.set_fact:
+    agof_aap_token_is_usable: >-
+      {{
+        aap_token is defined
+        and (aap_token | string | trim | length > 0)
+        and not (aap_token is search('^\{\{'))
+      }}
+
+- name: Discard placeholder aap_token values from config-as-code var files
+  ansible.builtin.set_fact:
+    aap_token: ""
+  when: not (agof_aap_token_is_usable | bool)
+
+- name: Evaluate whether current hub_token can be used for API authentication
+  ansible.builtin.set_fact:
+    agof_aap_hub_token_is_usable: >-
+      {{
+        hub_token is defined
+        and (hub_token | string | trim | length > 0)
+        and not (hub_token is search('^\{\{'))
+      }}
+
+- name: Discard placeholder hub_token values from config-as-code var files
+  ansible.builtin.set_fact:
+    hub_token: ""
+  when: not (agof_aap_hub_token_is_usable | bool)
+
+- name: Resolve platform gateway OAuth token for config-as-code
+  ansible.builtin.set_fact:
+    aap_token: "{{ aap_token_vault }}"
+    agof_aap_token_is_usable: true
+  when:
+    - not (agof_aap_token_is_usable | default(false) | bool)
+    - aap_token_vault is defined
+    - aap_token_vault | length > 0
+  no_log: true
+
+- name: Resolve Automation Hub API token for config-as-code
+  ansible.builtin.set_fact:
+    hub_token: "{{ hub_token_vault }}"
+    agof_aap_hub_token_is_usable: true
+  when:
+    - not (agof_aap_hub_token_is_usable | default(false) | bool)
+    - hub_token_vault is defined
+    - hub_token_vault | length > 0
+  no_log: true
+
+- name: Bootstrap platform gateway OAuth token when not supplied in vault
+  when: not (agof_aap_token_is_usable | default(false) | bool)
+  block:
+    - name: Request OAuth token from platform gateway
+      ansible.builtin.uri:
+        url: "https://{{ aap_hostname }}/api/gateway/v1/tokens/"
+        method: POST
+        user: "{{ aap_username | default(admin_user | default('admin')) }}"
+        password: "{{ aap_password | default(admin_password) }}"
+        force_basic_auth: true
+        validate_certs: "{{ aap_validate_certs | bool }}"
+        body_format: json
+        body: {}
+        status_code: 201
+      register: agof_aap_gateway_token_response
+      no_log: true
+
+    - name: Set bootstrapped platform gateway OAuth token
+      ansible.builtin.set_fact:
+        aap_token: "{{ agof_aap_gateway_token_response.json.token }}"
+        agof_aap_gateway_token_revoke_url: "{{ agof_aap_gateway_token_response.json.url | default('') }}"
+        agof_aap_token_source: bootstrap
+        agof_aap_token_is_usable: true
+        agof_aap_auth_mode: token
+      no_log: true
+
+  rescue:
+    - name: Note gateway token bootstrap unavailable on AAP 2.5
+      ansible.builtin.debug:
+        msg: >-
+          Could not obtain a platform gateway OAuth token from
+          https://{{ aap_hostname }}/api/gateway/v1/tokens/. Falling back to
+          gateway username/password for config-as-code.
+
+- name: Record vault-provided platform gateway token source
+  ansible.builtin.set_fact:
+    agof_aap_token_source: vault
+    agof_aap_auth_mode: token
+  when:
+    - agof_aap_token_source is not defined
+    - agof_aap_token_is_usable | default(false) | bool
+    - aap_token is defined
+    - aap_token | length > 0
+
+- name: Use platform gateway credentials for config-as-code on AAP 2.5
+  when: not (agof_aap_token_is_usable | default(false) | bool)
+  block:
+    - name: Set gateway username and password for dispatch
+      ansible.builtin.set_fact:
+        aap_username: "{{ aap_username | default(admin_user | default('admin')) }}"
+        aap_password: "{{ aap_password | default(admin_password) }}"
+        agof_aap_auth_mode: password
+        aap_token: ""
+      no_log: true
+
+    - name: Assert admin credentials are available for config-as-code
+      ansible.builtin.assert:
+        that:
+          - aap_password is defined
+          - aap_password | string | length > 0
+        fail_msg: >-
+          No platform gateway OAuth token or admin credentials are available for config-as-code on
+          AAP 2.5. Set aap_token_vault in ~/agof_vault.yml, or ensure admin_password (or aap_password)
+          is set. Also verify collection versions match your AAP release
+          (containerized_installer_version or aap_version 2.5, then re-run make preinit).
+
+- name: Bootstrap Automation Hub API token via platform gateway
+  when:
+    - agof_aap_token_is_usable | default(false) | bool
+    - not (agof_aap_hub_token_is_usable | default(false) | bool)
+    - automation_hub | default(false) | bool
+  block:
+    - name: Request Hub token through platform gateway
+      ansible.builtin.uri:
+        url: "https://{{ aap_hostname }}/api/galaxy/v3/auth/token/"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ aap_token }}"
+        validate_certs: "{{ aap_validate_certs | bool }}"
+        body_format: json
+        body: {}
+        status_code: [200, 201]
+      register: agof_hub_token_response
+      no_log: true
+
+    - name: Set bootstrapped Hub API token
+      ansible.builtin.set_fact:
+        hub_token: "{{ agof_hub_token_response.json.token }}"
+        agof_hub_token_source: bootstrap
+        agof_aap_hub_token_is_usable: true
+      no_log: true
+
+  rescue:
+    - name: Note Hub token was not obtained through platform gateway
+      ansible.builtin.debug:
+        msg: >-
+          Could not obtain an Automation Hub API token via platform gateway. Set hub_token_vault in
+          ~/agof_vault.yml if your config repo defines hub resources.
+
+- name: Record vault-provided Hub token source
+  ansible.builtin.set_fact:
+    agof_hub_token_source: vault
+  when:
+    - hub_token is defined
+    - hub_token | length > 0
+    - agof_hub_token_source is not defined
+
+- name: Record existing config-as-code token auth mode for AAP 2.5
+  ansible.builtin.set_fact:
+    agof_aap_auth_mode: token
+    agof_aap_token_source: "{{ agof_aap_token_source | default('config-as-code') }}"
+  when:
+    - agof_aap_auth_mode is not defined
+    - agof_aap_token_is_usable | default(false) | bool

@@ -1,28 +1,24 @@
 ---
+- name: Resolve target AAP version from vault overrides
+  ansible.builtin.set_fact:
+    aap_version: "{{ (aap_version | default(containerized_installer_version | default('2.7'))) | string }}"
+
 - name: Show AAP hostname
   ansible.builtin.debug:
     msg:
       - "aap_hostname: {{ aap_hostname }}"
 
-- name: "Checkout infrastructure-as-code directory"
-  ansible.builtin.git:
-    repo: "{{ agof_iac_repo }}"
-    version: "{{ agof_iac_repo_version | default('main') }}"
-    dest: "{{ agof_controller_config_dir }}"
-    force: true
-    clone: true
-    update: true
-    recursive: true
-  register: git_checkout
+- name: "Checkout config-as-code repository"
+  ansible.builtin.include_tasks: checkout_config_repo.yml
 
 - name: Show Git coordinates
   ansible.builtin.debug:
     msg:
-      - "agof_iac_repo: {{ agof_iac_repo }}"
-      - "agof_iac_repo_version: {{ agof_iac_repo_version | default('main') }}"
+      - "agof_config_repo: {{ agof_config_repo }}"
+      - "agof_config_repo_version: {{ agof_config_repo_version }}"
       - "Checked out to: {{ agof_controller_config_dir }}"
-      - "Git SHA before checkout: {{ git_checkout.before }}"
-      - "Git SHA after checkout: {{ git_checkout.after }}"
+      - "Git SHA before checkout: {{ git_checkout.before | default('n/a (new clone)') }}"
+      - "Git SHA after checkout: {{ git_checkout.after | default('unknown') }}"
 
 - name: Include vars from configs directory
   ansible.builtin.include_vars:
@@ -101,12 +97,34 @@
   until: license_controller is not failed
   retries: 5
 
+- name: Obtain config-as-code credentials for AAP 2.5
+  ansible.builtin.include_tasks: obtain_aap_auth_25.yml
+  when: aap_version is version('2.5', '==')
+
+- name: Obtain platform gateway API tokens for config-as-code dispatch
+  ansible.builtin.include_tasks: obtain_aap_gateway_token.yml
+  when: aap_version is version('2.6', '>=')
+
+- name: Show AAP version and auth mode for config-as-code
+  ansible.builtin.debug:
+    msg:
+      - "aap_version: {{ aap_version }}"
+      - "aap_hostname: {{ aap_hostname }}"
+      - >-
+        config-as-code auth: {{
+          'token (source: ' ~ agof_aap_token_source ~ ')'
+          if (agof_aap_auth_mode | default('token')) == 'token'
+          else 'password (gateway username/password)'
+        }}
+      - "hub token: {{ 'yes (source: ' ~ agof_hub_token_source ~ ')' if hub_token is defined and hub_token | length > 0 else 'not set' }}"
+
 - name: Debug infra.controller_configuration.dispatch common variables
   ansible.builtin.debug:
     msg:
       - "aap_hostname: {{ aap_hostname }}"
       - "aap_validate_certs: {{ aap_validate_certs }}"
-      - "aap_username: {{ aap_username }}"
+      - "config-as-code auth mode: {{ agof_aap_auth_mode | default('token') }}"
+      - "aap_token: {{ '(set, not logged)' if (agof_aap_auth_mode | default('token')) == 'token' else '(not used)' }}"
       - "aap_request_timeout: {{ aap_request_timeout }}"
       - "aap_configuration_async_dir: {{ aap_configuration_async_dir }}"
   when:
